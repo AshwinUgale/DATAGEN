@@ -1,74 +1,97 @@
-"""PoC: lint representative DATAGEN research traces with tracelint.
+"""Proof of concept: lint representative DATAGEN research traces with tracelint.
 
 tracelint (https://github.com/AshwinUgale/tracelint) is a deterministic, judge-free linter for
-agent runs: it reads an execution trace and flags structural defects — ignored tool errors,
-errored values reused in side effects, loops, duplicate side effects — with the exact evidence
-and a CI exit code. No LLM judges the trace.
+agent runs. It reads an execution trace and flags structural defects — ignored tool errors,
+errored values reused in side effects, loops, duplicate side effects — with the exact evidence and
+a CI exit code; no model judges the trace.
 
-This test lints two committed traces that mirror DATAGEN's multi-agent research flow (see
-``integrations/tracelint/``) and asserts the two properties the integration cares about:
+The traces under ``integrations/tracelint/`` mirror DATAGEN's real tool-calling flow. DATAGEN tools
+catch exceptions and *return* ``"Error: ..."`` strings rather than raising, so a captured result
+carries no structured error status. These tests therefore show three things:
 
-1. a run with real structural defects is caught and would gate CI (exit code 2); and
-2. a legitimate run — repeated *research* searches and a *retried* scrape — is NOT flagged,
-   i.e. tracelint does not add noise on legitimate repetition.
+* with a ``failure_when`` contract (``tools.json``), a run with real structural defects is caught
+  and would gate CI (exit code 2);
+* without that contract (``tools.no_contract.json``), the same errored strings are structurally
+  UNKNOWN, so tracelint stays conservative and does not gate CI (exit code 0); and
+* a legitimate run — different research reads plus a retried scrape — is not flagged as a defect.
 
-tracelint is an optional dev/CI dependency; this test skips cleanly when it is absent, so it never
-affects DATAGEN's own test run or CI. To run it locally: ``pip install "tracelint>=0.8.0"``.
+tracelint is an optional dev dependency; the test skips cleanly when it is absent, so it never
+affects DATAGEN's own test run or CI. To run it: ``pip install "tracelint>=0.8.0"``.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 tracelint = pytest.importorskip("tracelint")
 
-from tracelint import Trace, ToolRegistry, lint_trace  # noqa: E402
-from tracelint.findings import ConfidenceTier  # noqa: E402
-from tracelint.rules import select_rules  # noqa: E402
-
 _INTEGRATION = Path(__file__).resolve().parents[1] / "integrations" / "tracelint"
 _TRACES = _INTEGRATION / "traces"
-_TOOLS = _INTEGRATION / "tools.json"
-
-# Structural rules meaningful for DATAGEN's tool-calling flow.
-#   R1 (schema violation) auto-suppresses without declared tool schemas (disclosed, not a pass).
-#   R3 (hallucinated arg) needs per-field provenance annotations (``x-value-origin``) to be
-#   meaningful; without them it flags every model-generated search query, so it is scoped out
-#   here rather than adding noise on legitimate research actions.
-_RULES = ["R2a", "R2b", "R4", "R5", "R6", "R7", "R8"]
+_CONTRACT = _INTEGRATION / "tools.json"
+_NO_CONTRACT = _INTEGRATION / "tools.no_contract.json"
 
 
-def _lint(trace_name: str):
-    trace = Trace.load(str(_TRACES / trace_name))
-    registry = ToolRegistry.load(str(_TOOLS))
-    return lint_trace(trace, select_rules(_RULES), registry)
+def _lint(trace_name: str, tools_path: Path) -> Any:
+    """Lint one trace fixture against a tools contract.
+
+    Args:
+        trace_name: File name of the trace under ``integrations/tracelint/traces``.
+        tools_path: Path to the ``tools.json`` contract to load.
+
+    Returns:
+        The tracelint report for the run.
+    """
+    trace = tracelint.Trace.load(str(_TRACES / trace_name))
+    registry = tracelint.ToolRegistry.load(str(tools_path))
+    # Every shipped rule except R3 (hallucinated argument), which needs per-field provenance
+    # annotations (x-value-origin) to be meaningful and would otherwise flag every
+    # model-generated search query.
+    rules = [rule for rule in tracelint.default_rules() if rule.id != "R3"]
+    return tracelint.lint_trace(trace, rules, registry)
 
 
-def test_defect_trace_is_caught_and_gates_ci():
-    """A search that errored, whose value was written into the saved report, and a report written
-    twice with identical arguments — both structural defects tracelint must catch."""
-    report = _lint("research_run_defect.json")
+def _hard_defect_rules(report: Any) -> set[str]:
+    """Return the rule ids that produced a hard-defect finding in ``report``."""
+    tier = tracelint.ConfidenceTier.HARD_DEFECT
+    return {finding.rule for finding in report.active_findings if finding.tier is tier}
+
+
+def test_defect_trace_is_caught_with_a_failure_contract() -> None:
+    """With a failure_when contract, the run's defects are provable and gate CI (exit 2).
+
+    An errored ``google_search`` string was written into the report via the side-effecting
+    ``create_document`` (R2b), and the non-idempotent ``edit_document`` was repeated verbatim (R8).
+    """
+    report = _lint("research_run_defect.json", _CONTRACT)
 
     assert report.has_hard_defect
-    assert report.exit_code == 2  # a structurally-provable defect fails CI
-
-    hard_defects = {f.rule for f in report.active_findings if f.tier is ConfidenceTier.HARD_DEFECT}
-    # R2b: a value from the errored google_search result was reused as an argument to the
-    # side-effecting write_document (the failed search written into the saved report).
-    assert "R2b" in hard_defects
-
-    all_rules = {f.rule for f in report.active_findings}
-    # R8: write_document called twice with equivalent arguments after the first succeeded.
-    assert "R8" in all_rules
+    assert report.exit_code == 2
+    assert "R2b" in _hard_defect_rules(report)
+    assert "R8" in {finding.rule for finding in report.active_findings}
 
 
-def test_clean_trace_has_no_defect_and_tolerates_legit_repeats():
-    """Three *different* research searches and a *retried* scrape are legitimate — tracelint must
-    not report a defect, so a clean run stays green in CI."""
-    report = _lint("research_run_clean.json")
+def test_defect_trace_stays_conservative_without_a_contract() -> None:
+    """Without failure_when, DATAGEN's ``"Error: ..."`` results are structurally UNKNOWN.
+
+    tracelint then reports only review-only candidates and does not gate CI (exit 0), instead of
+    guessing that an unclassifiable result was a failure.
+    """
+    report = _lint("research_run_defect.json", _NO_CONTRACT)
 
     assert not report.has_hard_defect
     assert report.exit_code == 0
-    assert not any(f.tier is ConfidenceTier.HARD_DEFECT for f in report.active_findings)
+
+
+def test_clean_trace_tolerates_legit_repeats_and_retries() -> None:
+    """Different research reads and a retried scrape are legitimate, so a clean run stays green.
+
+    The transient scrape error is surfaced as an event, never a defect, so exit code stays 0.
+    """
+    report = _lint("research_run_clean.json", _CONTRACT)
+
+    assert not report.has_hard_defect
+    assert report.exit_code == 0
+    assert not _hard_defect_rules(report)
