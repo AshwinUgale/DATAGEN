@@ -26,7 +26,7 @@ from typing import Any
 
 import pytest
 
-tracelint = pytest.importorskip("tracelint")
+tracelint = pytest.importorskip("tracelint", minversion="0.8.0")
 
 _INTEGRATION = Path(__file__).resolve().parents[1] / "integrations" / "tracelint"
 _TRACES = _INTEGRATION / "traces"

@@ -52,7 +52,7 @@ def main() -> None:
     print(
         f"Captured {_OUT}. Lint it with:\n"
         f"  tracelint check {_OUT} --format openinference "
-        f"--tools {_TOOLS} --rules R2a,R2b,R4,R5,R6,R7,R8"
+        f"--tools {_TOOLS} --rules R1,R2a,R2b,R4,R5,R6,R7,R8"
     )
 
 

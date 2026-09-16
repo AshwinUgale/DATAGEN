@@ -45,7 +45,7 @@ was then called **twice with identical arguments** (**R8**):
 
 ```
 $ tracelint check integrations/tracelint/traces/research_run_defect.json \
-    --tools integrations/tracelint/tools.json --rules R2a,R2b,R4,R5,R6,R7,R8
+    --tools integrations/tracelint/tools.json --rules R1,R2a,R2b,R4,R5,R6,R7,R8
 datagen-research-defect: 3 finding(s), exit 2
   [hard_event]  R2a  'google_search' returned a declared failure ((result)='Error: RateLimited: ...')
   [hard_defect] R2b  value(s) from the errored 'google_search' result reused as arguments to
@@ -60,7 +60,7 @@ rather than guessing — it does **not** gate CI:
 
 ```
 $ tracelint check integrations/tracelint/traces/research_run_defect.json \
-    --tools integrations/tracelint/tools.no_contract.json --rules R2a,R2b,R4,R5,R6,R7,R8 --include-candidates
+    --tools integrations/tracelint/tools.no_contract.json --rules R1,R2a,R2b,R4,R5,R6,R7,R8 --include-candidates
 datagen-research-defect: 2 finding(s), exit 0
   [candidate] R2a  'google_search' result may be an error — matches an exception-like pattern ('Error')
   [candidate] R8   'edit_document' repeats a call — the first call's outcome is unknown (may be a retry)
@@ -73,7 +73,7 @@ The transient error is surfaced as an *event*, not a *defect*:
 
 ```
 $ tracelint check integrations/tracelint/traces/research_run_clean.json \
-    --tools integrations/tracelint/tools.json --rules R2a,R2b,R4,R5,R6,R7,R8
+    --tools integrations/tracelint/tools.json --rules R1,R2a,R2b,R4,R5,R6,R7,R8
 datagen-research-clean: 1 finding(s), exit 0
   [hard_event] R2a  'scrape_webpages' returned a declared failure ((result)='Error: Timeout')
 ```
@@ -90,14 +90,15 @@ mishandled it*. Only `hard_defect` fails CI (exit `2`), so a retried transient e
 - **Read-only tools.** `google_search`, `scrape_webpages`, `wikipedia`, `arxiv`, `collect_data`,
   `read_document`, and `list_directory` are declared non-side-effecting (so R7 doesn't flag the ones
   agents actually use, like `wikipedia` / `arxiv`).
-- **Rules.** Runs `R2a,R2b,R4,R5,R6,R7,R8`. R1 (schema) auto-suppresses without tool schemas
+- **Rules.** Runs every shipped rule except R3 — i.e. `R1,R2a,R2b,R4,R5,R6,R7,R8`, matching the test
+  (`default_rules()` minus R3). R1 (schema) is included but auto-suppresses without tool schemas
   (disclosed, never a pass); R3 (hallucinated-arg) needs `x-value-origin` provenance annotations and
   is scoped out rather than flag every model-generated search query.
 
 ## Run it
 
 ```bash
-pip install "tracelint>=0.8.0"                  # 0.8.0 adds R8 + the rule/format flags used here
+pip install "tracelint>=0.8.0"                  # the version this PoC was verified against
 pytest tests/test_tracelint_integration.py      # skips cleanly if tracelint isn't installed
 ```
 
@@ -111,7 +112,7 @@ capture one and lint it — see [`capture_example.py`](capture_example.py), whic
 pip install "tracelint[capture-langchain]>=0.8.0"   # LangChain instrumentor; also captures LangGraph
 # around graph.stream(create_initial_state(topic), ...):  with capture("datagen_run.json", framework="langgraph"): ...
 tracelint check datagen_run.json --format openinference \
-  --tools integrations/tracelint/tools.json --rules R2a,R2b,R4,R5,R6,R7,R8
+  --tools integrations/tracelint/tools.json --rules R1,R2a,R2b,R4,R5,R6,R7,R8
 ```
 
 A full run is interactive (`src/system.py` reads the topic via `input()`). DATAGEN runs on LangGraph,
